@@ -2,6 +2,8 @@ import sys
 import re
 import logging
 
+from docopt import docopt
+
 from texttables import Dialect
 from texttables.dynamic import writer
 
@@ -23,7 +25,7 @@ class TableDialect(Dialect):
     header_delimiter = '='
     row_delimiter = '-'
     top_border = '='
-    bottom_border = '_'
+    bottom_border = '-'
     left_border = '|'
     cell_delimiter = '|'
     right_border = '|'
@@ -52,10 +54,6 @@ class Column(object):
                self.auto == right.auto and \
                self.nullable == right.nullable
 
-    def diff(self, pt, column):
-        if self != column:
-            pt.writerow([self.sql, column.sql])
-
     @staticmethod
     def parse(sql):
         col = Column(sql)
@@ -80,11 +78,27 @@ class Column(object):
         return col
 
 
+class Key(object):
+    def __init__(self, sql):
+        self.sql = sql
+        self.name = None
+
+    @staticmethod
+    def parse(sql):
+        key = Key(sql)
+
+        if sql.startswith('PRIMARY KEY'):
+            pass
+
+        return key
+
+
 class Table(object):
     def __init__(self, sql, name=None):
         self.sql = sql
         self.name = name
         self.columns = {}
+        self.keys = {}
 
     @property
     def names(self):
@@ -96,25 +110,13 @@ class Table(object):
     def __setitem__(self, key, value):
         self.columns[key] = value
 
-    def add(self, col):
+    def add_column(self, col):
         col = Column.parse(col)
         self.columns[col.name] = col
 
-    def diff(self, pt, table):
-        if self.columns == table.columns:
-            return
-
-        left_cols = self.names
-        right_cols = table.names
-
-        pt.writerow([format_table(self.name), format_table(table.name)])
-        for m_left in left_cols.difference(right_cols):
-            pt.writerow([m_left, ''])
-        for m_right in right_cols.difference(left_cols):
-            pt.writerow(['', m_right])
-
-        for both in left_cols.intersection(right_cols):
-            self[both].diff(pt, table[both])
+    def add_key(self, key):
+        key = Key.parse(key)
+        self.keys[key.name] = key
 
     @staticmethod
     def parse(sql):
@@ -128,15 +130,23 @@ class Table(object):
                 table.name = m.group(1)
                 continue
 
-            if line.startswith('`'):
+            elif line.startswith('`'):
                 try:
-                    table.add(line)
+                    table.add_column(line)
                 except ValueError as e:
                     LOGGER.exception(e)
                     raise
                 continue
 
-            if line.startswith(')'):
+            elif 'KEY' in line:
+                try:
+                    table.add_key(line)
+                except ValueError as e:
+                    LOGGER.exception(e)
+                    raise
+                continue
+
+            elif line.startswith(')'):
                 break
 
         if not table.name:
@@ -167,23 +177,8 @@ class Schema(object):
         table = Table.parse(sql)
         self.tables[table.name] = table
 
-    def diff(self, schema):
-        left_tables = self.names
-        right_tables = schema.names
-
-        with writer(sys.stdout, dialect=TableDialect) as pt:
-            pt.writeheader([
-                '%s: %s (%s)' % (self.name, self.db, self.version),
-                '%s: %s (%s)' % (schema.name, schema.db, schema.version),
-            ])
-
-            for m_left in left_tables.difference(right_tables):
-                pt.writerow([format_table(m_left), ''])
-            for m_right in right_tables.difference(left_tables):
-                pt.writerow(['', format_table(m_right)])
-
-            for both in left_tables.intersection(right_tables):
-                self[both].diff(pt, schema[both])
+    def diff(self, destination, keys=False, constraints=False, collation=False):
+        return Differences(self, destination, keys, constraints, collation)
 
     @staticmethod
     def parse(sql_path):
@@ -207,12 +202,96 @@ class Schema(object):
             return schema
 
 
-def main(args):
-    schemaA = Schema.parse(args[0])
-    schemaB = Schema.parse(args[1])
+class Differences(object):
+    def __init__(self, source, destination, keys, constraints, collation):
+        self.source = source
+        self.destination = destination
+        self.keys = keys
+        self.constraints = constraints
+        self.collation = collation
 
-    schemaA.diff(schemaB)
+    def drop_tables(self):
+        pass
+
+    def alter_tables(self):
+        pass
+
+    def print_tables(self):
+        src_tables = self.source.names
+        dst_tables = self.destination.names
+
+        with writer(sys.stdout, dialect=TableDialect) as pt:
+            pt.writeheader([
+                '%s: %s (%s)' % (self.source.name, self.source.db,
+                                 self.source.version),
+                '%s: %s (%s)' % (self.destination.name, self.destination.db,
+                                 self.destination.version),
+            ])
+
+            for m_src in src_tables.difference(dst_tables):
+                pt.writerow(['', format_table(m_src)])
+            for m_dst in dst_tables.difference(src_tables):
+                pt.writerow([format_table(m_dst), ''])
+
+            for both in src_tables.intersection(dst_tables):
+                src_table = self.source[both]
+                dst_table = self.destination[both]
+                if src_table.columns == dst_table.columns:
+                    continue
+
+                src_cols = src_table.names
+                dst_cols = dst_table.names
+
+                pt.writerow([format_table(src_table.name), format_table(dst_table.name)])
+                for m_src in src_cols.difference(dst_cols):
+                    pt.writerow([m_src, ''])
+                for m_dst in dst_cols.difference(src_cols):
+                    pt.writerow(['', m_dst])
+
+                for both in src_cols.intersection(dst_cols):
+                    src_col = src_table.columns[both]
+                    dst_col = dst_table.columns[both]
+                    if src_col != dst_col:
+                        pt.writerow([src_col.sql, dst_col.sql])
+
+
+def main(opts):
+    """
+    SQLdiff
+
+    Usage:
+        sqldiff (<source.sql> <destination.sql>) [--keys] [--constraints]
+                [--collation] [--include=<NAME>... | --exclude=<NAME>...]
+                [--drop-tables] [--alter-tables]
+    
+    Options:
+        --keys              Compare keys.
+        --constraints       Compare constraints.
+        --collation         Compare collation.
+        --include=<NAME>... Only consider listed tables.
+        --exclude=<NAME>... Do not consider listed tables.
+        --drop-tables       Generate SQL to drop tables from destination.
+        --alter-tables      Generate SQL to alter tables / columns on destination.
+    """
+    kwargs = {
+        'keys': opts['--keys'],
+        'constraints': opts['--constraints'],
+        'collation': opts['--collation'],
+    }
+    schemaA = Schema.parse(opts['<source.sql>'])
+    schemaB = Schema.parse(opts['<destination.sql>'])
+    diff = schemaA.diff(schemaB, **kwargs)
+
+    if opts['--drop-tables']:
+        diff.drop_tables()
+
+    if opts['--alter-tables']:
+        diff.alter_tables()
+
+    if not opts['--drop-tables'] and not opts['--alter-tables']:
+        diff.print_tables()
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    opts = docopt(main.__doc__)
+    main(opts)
