@@ -217,9 +217,11 @@ class Differences(object):
         for m_dst in dst_tables.difference(src_tables):
             print('DROP TABLE `%s`;' % m_dst)
 
-    def sql_alter_tables(self):
+    def sql_alter_tables(self, instant=False):
         src_tables = self.src.names
         dst_tables = self.dst.names
+
+        instant = ', algorithm=instant' if instant else ''
 
         for both in src_tables.intersection(dst_tables):
             src_table = self.src[both]
@@ -227,14 +229,15 @@ class Differences(object):
 
             for col in src_table.names.union(dst_table.names):
                 if col in src_table.names and col not in dst_table.names:
-                    print('ALTER TABLE `%s` ADD COLUMN %s;' % (
-                        dst_table.name, src_table.columns[col].sql))
+                    print('ALTER TABLE `%s` ADD COLUMN %s%s;' % (
+                        dst_table.name, src_table.columns[col].sql, instant))
                 elif col in dst_table.names and col not in src_table.names:
-                    print('ALTER TABLE `%s` DROP COLUMN `%s`;' % (dst_table.name, col))
+                    print('ALTER TABLE `%s` DROP COLUMN `%s`%s;' % (
+                        dst_table.name, col, instant))
                 elif src_table[col] != dst_table[col]:
                     # print('/* %s */' % dst_table.columns[col].sql)
-                    print('ALTER TABLE `%s` MODIFY COLUMN %s;' % (
-                        dst_table.name, src_table.columns[col].sql))
+                    print('ALTER TABLE `%s` MODIFY COLUMN %s%s;' % (
+                        dst_table.name, src_table.columns[col].sql, instant))
 
     def print_columns(self, pt, src_table, dst_table):
         if src_table.columns == dst_table.columns:
@@ -285,7 +288,7 @@ def main(opts):
     Usage:
         sqldiff (<source.sql> <destination.sql>) [--keys] [--constraints]
                 [--collation] [--include=<NAME>... | --exclude=<NAME>...]
-                [--drop-tables] [--alter-tables]
+                [--drop-tables] [--alter-tables] [--instant]
     
     Options:
         --keys              Compare keys.
@@ -295,6 +298,7 @@ def main(opts):
         --exclude=<NAME>... Do not consider listed tables.
         --drop-tables       Generate SQL to drop tables from destination.
         --alter-tables      Generate SQL to alter tables / columns on destination.
+        --instant           Generate SQL DDL using ALGORITHM=INSTANT
     """
     kwargs = {
         'keys': opts['--keys'],
@@ -316,7 +320,7 @@ def main(opts):
         diff.sql_drop_tables()
 
     if opts['--alter-tables']:
-        diff.sql_alter_tables()
+        diff.sql_alter_tables(instant=opts['--instant'])
 
 
 if __name__ == '__main__':
